@@ -29,6 +29,14 @@ Używa wyłącznie oficjalnych poleceń PowerShell Microsoftu
 - **Przełącznik PL / EN** w prawym górnym rogu.
 - Automatyczne pytanie o uprawnienia administratora (UAC) przy starcie.
 
+## Zrzuty ekranu
+
+![Zarządzanie wyjątkami](assets/screenshot-wyjatki.png)
+
+![Ochrona i aktualny stan Defendera](assets/screenshot-ochrona.png)
+
+> Zrzuty przedstawiają przykładowe dane demonstracyjne, nie rzeczywiste wyjątki.
+
 ## Pobieranie
 
 Gotowy plik `EasyDefenderExclusions.exe` znajdziesz w zakładce
@@ -87,6 +95,14 @@ It uses only Microsoft's official PowerShell commands
 - **Protection** — enable or disable all main protection modules at once, with a live status view.
 - **PL / EN switch** in the top-right corner.
 - Prompts for administrator rights (UAC) automatically on launch.
+
+## Screenshots
+
+![Exclusions manager (English)](assets/screenshot-en.png)
+
+![Protection and current Defender state](assets/screenshot-ochrona.png)
+
+> Screenshots show sample demo data, not real exclusions.
 
 ## Download
 

@@ -13,8 +13,10 @@ działa na własnej maszynie i wymaga uprawnień administratora.
 
 import ctypes
 import os
+import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -54,6 +56,7 @@ TR = {
         "hint_extension": "Rozszerzenie bez kropki, np. iso lub tmp",
         "items": "pozycji",
         "ready": "Gotowe.",
+        "working": "Proszę czekać…",
         "added": "Dodano wyjątek: {v}",
         "removed": "Usunięto wyjątek: {v}",
         "confirm_remove": "Usunąć wyjątek?\n\n{v}",
@@ -115,6 +118,7 @@ TR = {
         "hint_extension": "Extension without the dot, e.g. iso or tmp",
         "items": "items",
         "ready": "Ready.",
+        "working": "Please wait…",
         "added": "Added exclusion: {v}",
         "removed": "Removed exclusion: {v}",
         "confirm_remove": "Remove exclusion?\n\n{v}",
@@ -343,13 +347,17 @@ class ExclusionTab(ttk.Frame):
         value = self.entry.get().strip().strip('"')
         if not value:
             return
-        ok, err = add_exclusion(self.property_name, value)
-        if ok:
-            self.entry.delete(0, "end")
-            self.refresh()
-            self.app.set_status(t("added", v=value))
-        else:
-            messagebox.showerror(APP_NAME, t("err_add", e=err))
+
+        def done(res, exc):
+            ok, err = res if res else (False, str(exc))
+            if ok:
+                self.entry.delete(0, "end")
+                self.refresh()
+                self.app.set_status(t("added", v=value))
+            else:
+                messagebox.showerror(APP_NAME, t("err_add", e=err))
+
+        self.app.run_bg(lambda: add_exclusion(self.property_name, value), done, t("working"))
 
     def on_remove(self) -> None:
         sel = self.listbox.curselection()
@@ -358,16 +366,25 @@ class ExclusionTab(ttk.Frame):
         value = self.listbox.get(sel[0])
         if not messagebox.askyesno(APP_NAME, t("confirm_remove", v=value)):
             return
-        ok, err = remove_exclusion(self.property_name, value)
-        if ok:
-            self.refresh()
-            self.app.set_status(t("removed", v=value))
-        else:
-            messagebox.showerror(APP_NAME, t("err_remove", e=err))
+
+        def done(res, exc):
+            ok, err = res if res else (False, str(exc))
+            if ok:
+                self.refresh()
+                self.app.set_status(t("removed", v=value))
+            else:
+                messagebox.showerror(APP_NAME, t("err_remove", e=err))
+
+        self.app.run_bg(lambda: remove_exclusion(self.property_name, value), done, t("working"))
 
     def refresh(self) -> None:
+        self.app.run_bg(
+            lambda: get_exclusions(self.property_name),
+            lambda res, exc: self._fill(res or []),
+        )
+
+    def _fill(self, items) -> None:
         self.listbox.delete(0, "end")
-        items = get_exclusions(self.property_name)
         for item in items:
             self.listbox.insert("end", item)
         self.count_label.config(text=f"{len(items)} {t('items')}")
@@ -406,19 +423,31 @@ class ProtectionTab(ttk.Frame):
     def toggle(self, enable: bool) -> None:
         if not messagebox.askyesno(APP_NAME, t("confirm_enable") if enable else t("confirm_disable")):
             return
-        ok, err = set_protection(enable)
-        self.refresh()
-        tamper = get_protection_status().get("Tamper", "").lower()
-        if not enable and tamper == "true":
-            messagebox.showwarning(APP_NAME, t("tamper_warn"))
-        elif ok:
-            self.app.set_status(t("prot_changed") if enable else t("prot_disabled_sent"))
-        else:
-            messagebox.showerror(APP_NAME, t("prot_err", e=err))
+
+        def work():
+            ok, err = set_protection(enable)
+            return ok, err, get_protection_status()
+
+        def done(res, exc):
+            if not res:
+                messagebox.showerror(APP_NAME, t("prot_err", e=str(exc)))
+                return
+            ok, err, status = res
+            self._render_status(status)
+            tamper = status.get("Tamper", "").lower()
+            if not enable and tamper == "true":
+                messagebox.showwarning(APP_NAME, t("tamper_warn"))
+            elif ok:
+                self.app.set_status(t("prot_changed") if enable else t("prot_disabled_sent"))
+            else:
+                messagebox.showerror(APP_NAME, t("prot_err", e=err))
+
+        self.app.run_bg(work, done, t("working"))
 
     def refresh(self) -> None:
-        s = get_protection_status()
+        self.app.run_bg(get_protection_status, lambda res, exc: self._render_status(res or {}))
 
+    def _render_status(self, s: dict) -> None:
         def yn(v: str) -> str:
             return {"true": t("on"), "false": t("off")}.get(v.lower(), v or "?")
 
@@ -439,8 +468,12 @@ class App(tk.Tk):
         self.title(f"{APP_NAME}  v{APP_VERSION}")
         self.geometry("700x560")
         self.minsize(580, 440)
+        self._busy_count = 0
+        self.status = None
+        self._bg_queue: queue.Queue = queue.Queue()
         self._set_icon()
         self._build_ui()
+        self._poll_queue()
         if not defender_available():
             self.set_status(t("defender_warn"))
 
@@ -498,7 +531,51 @@ class App(tk.Tk):
         self._build_ui()
 
     def set_status(self, text: str) -> None:
-        self.status.config(text=text)
+        if getattr(self, "status", None) is not None:
+            self.status.config(text=text)
+
+    # -- praca w tle (nie blokuje UI) ------------------------------------- #
+    def run_bg(self, work, done=None, busy_msg=None) -> None:
+        """Uruchamia blokujące `work()` w wątku, wynik oddaje do `done` w wątku UI."""
+        self._set_busy(True, busy_msg)
+
+        def worker():
+            try:
+                result, err = work(), None
+            except Exception as exc:  # noqa: BLE001
+                result, err = None, exc
+            # Wynik przekazujemy do wątku UI przez kolejkę (after() nie jest thread-safe).
+            self._bg_queue.put((result, err, done))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_queue(self) -> None:
+        """Działa w wątku UI: odbiera gotowe wyniki i uruchamia ich callbacki."""
+        try:
+            while True:
+                result, err, done = self._bg_queue.get_nowait()
+                self._set_busy(False)
+                if done is not None:
+                    done(result, err)
+        except queue.Empty:
+            pass
+        try:
+            self.after(60, self._poll_queue)
+        except Exception:
+            pass  # okno zamknięte
+
+    def _set_busy(self, busy: bool, msg: str | None = None) -> None:
+        self._busy_count = max(self._busy_count + (1 if busy else -1), 0)
+        try:
+            self.config(cursor="watch" if self._busy_count else "")
+        except Exception:
+            pass
+        if busy and msg:
+            self.set_status(msg)
+        elif not busy and self._busy_count == 0:
+            # wyczyść komunikat „proszę czekać", jeśli nikt nie ustawił innego
+            if getattr(self, "status", None) is not None and self.status.cget("text") == t("working"):
+                self.set_status(t("ready"))
 
 
 def main() -> None:
