@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Wygenerowane ikony (tworzone przez make_icon.py / CI)
+assets/padlock.ico
+assets/padlock.png
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
